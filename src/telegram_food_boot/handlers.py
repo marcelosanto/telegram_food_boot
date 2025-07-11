@@ -1,4 +1,5 @@
 import logging
+import aiosqlite
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -82,7 +83,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(translations['pt']['select_nutrient'], reply_markup=reply_markup)
         return TIPO_META
     elif query.data == 'track_water':
-        await query.message.reply_text(translations['pt']['enter_water'])
+        await query.message.reply_text(translations['pt']['enter_water'], parse_mode='Markdown')
         return QUANTIDADE_AGUA
     elif query.data == 'tips':
         tips = [
@@ -249,7 +250,10 @@ async def goal_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(translations['pt']['positive_number'])
             return VALOR_META
         user_id = update.message.from_user.id
-        await save_meal(user_id, context.user_data['meal_type'], context.user_data['food_id'], context.user_data['quantity'])
+        async with aiosqlite.connect('nutribot.db') as db:
+            await db.execute('INSERT OR REPLACE INTO goals (user_id, nutrient, value) VALUES (?, ?, ?)',
+                             (user_id, context.user_data['goal_type'], value))
+            await db.commit()
         await update.message.reply_text(
             translations['pt']['goal_set'].format(
                 nutrient=context.user_data['goal_type'].replace(
@@ -262,6 +266,14 @@ async def goal_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text(translations['pt']['invalid_number'])
         return VALOR_META
+
+
+async def start_track_water(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicia o rastreamento de água."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(translations['pt']['enter_water'], parse_mode='Markdown')
+    return QUANTIDADE_AGUA
 
 
 async def track_water(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,7 +292,11 @@ async def track_water(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor = await db.execute('SELECT SUM(amount) FROM water WHERE user_id = ? AND date = ?',
                                       (user_id, today))
             total = (await cursor.fetchone())[0] or 0
-        await update.message.reply_text(translations['pt']['water_added'].format(amount=amount, total=total), parse_mode='Markdown')
+        await update.message.reply_text(
+            translations['pt']['water_added'].format(
+                amount=amount, total=total),
+            parse_mode='Markdown'
+        )
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text(translations['pt']['invalid_number'])
@@ -613,11 +629,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lida com erros do bot."""
-    logger.warning('Atualização "%s" causou erro "%s"', update, context.error)
+    logger.error(
+        f"Erro ao processar atualização {update}: {context.error}", exc_info=True)
 
 # Definir manipuladores
 start = CommandHandler("start", start)
-button = CallbackQueryHandler(button)
+button = CallbackQueryHandler(
+    button, pattern='^(register_meal|summary|set_goals|track_water|tips|calculators|set_reminder|cancel)$')
 meal_conv = ConversationHandler(
     entry_points=[
         CallbackQueryHandler(
@@ -642,7 +660,8 @@ goal_conv = ConversationHandler(
     fallbacks=[CommandHandler('cancelar', cancel)]
 )
 water_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(button, pattern='^track_water$')],
+    entry_points=[CallbackQueryHandler(
+        start_track_water, pattern='^track_water$')],
     states={
         QUANTIDADE_AGUA: [MessageHandler(
             filters.TEXT & ~filters.COMMAND, track_water)]
