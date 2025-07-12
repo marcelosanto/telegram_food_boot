@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 translations = {
@@ -48,6 +49,18 @@ translations = {
         'reminder_water': '💧 Hora de se hidratar! Registre sua água com /start.'
     }
 }
+
+
+def load_food_data():
+    """Carrega os dados de alimentos do arquivo tabela_alimentos.json."""
+    try:
+        with open('tabela_alimentos.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            "Arquivo tabela_alimentos.json não encontrado.")
+    except json.JSONDecodeError:
+        raise ValueError("Erro ao decodificar tabela_alimentos.json.")
 
 
 def get_food_nutrients(food_id, quantity, food_data):
