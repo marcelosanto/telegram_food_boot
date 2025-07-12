@@ -14,7 +14,7 @@ from .dependencies import get_db, get_user_id, verify_password, get_password_has
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-SECRET_KEY = "your-secret-key-here"  # Replace with a secure key
+SECRET_KEY = "your-secret-key-here"  # .env
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
