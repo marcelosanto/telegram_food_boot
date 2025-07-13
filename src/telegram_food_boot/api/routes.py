@@ -13,8 +13,8 @@ from .dependencies import get_db, get_user_id, verify_password, get_password_has
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-SECRET_KEY = "your-secret-key-here"  # .env
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login")
+SECRET_KEY = "your-secret-key-here"  # vai vim do .env
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -39,10 +39,13 @@ async def create_meal(meal: dict, db: aiosqlite.Connection = Depends(get_db), to
         )
 
 
-@router.get("/summary/{user_id}", response_model=SummaryResponse)
-async def get_summary(user_id: int = Depends(get_user_id), date: str = datetime.now().strftime('%Y-%m-%d'), db: aiosqlite.Connection = Depends(get_db)):
-    summary = await get_daily_summary(user_id, date, db)
-    return SummaryResponse(user_id=user_id, date=date, **summary)
+@router.get("/summary/{user_id}")
+async def get_summary(user_id: int, token: str = Depends(oauth2_scheme), db: aiosqlite.Connection = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload or payload.get("sub") != (await get_username_from_user_id(user_id, db)):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    # Logic to generate summary
+    return {"text": f"Summary for user {user_id}"}
 
 
 @router.post("/goals")
@@ -56,15 +59,16 @@ async def create_goal(goal: GoalCreate, user_id: int = Depends(get_user_id), db:
 
 
 @router.post("/water")
-async def track_water(water: WaterCreate, user_id: int = Depends(get_user_id), db: aiosqlite.Connection = Depends(get_db)):
-    today = datetime.now().strftime('%Y-%m-%d')
-    async with db.execute('INSERT INTO water (user_id, amount, date) VALUES (?, ?, ?)',
-                          (user_id, water.amount, today)) as cursor:
-        await db.commit()
-    async with db.execute('SELECT SUM(amount) FROM water WHERE user_id = ? AND date = ?',
-                          (user_id, today)) as cursor:
-        total = (await cursor.fetchone())[0] or 0
-    return {"message": translations['pt']['water_added'].format(amount=water.amount, total=total)}
+async def register_water(user_id: int, amount: float, token: str = Depends(oauth2_scheme), db: aiosqlite.Connection = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload or payload.get("sub") != (await get_username_from_user_id(user_id, db)):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    await db.execute(
+        "INSERT INTO water (user_id, amount, date) VALUES (?, ?, ?)",
+        (user_id, amount, datetime.utcnow().isoformat())
+    )
+    await db.commit()
+    return {"message": "Water registered"}
 
 
 @router.get("/tips", response_model=TipResponse)
@@ -147,28 +151,20 @@ async def create_reminder(reminder: ReminderCreate, user_id: int = Depends(get_u
             status_code=400, detail=translations['pt']['invalid_time'])
 
 
-@router.post("/users", response_model=dict)
-async def create_user(user: UserCreate, db: aiosqlite.Connection = Depends(get_db)):
+@router.post("/users")
+async def create_user(username: str, password: str, db: aiosqlite.Connection = Depends(get_db)):
+    # Hash the password
+    hashed_password = pwd_context.hash(password)
     try:
-        # Hash the password
-        password_hash = pwd_context.hash(user.password)
-        # Insert user into database
         await db.execute(
             "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-            (user.username, password_hash)
+            (username, hashed_password)
         )
         await db.commit()
-        return {"message": "User created successfully", "access_token": create_access_token(user.username)}
     except aiosqlite.IntegrityError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already exists"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating user: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail="Username already exists")
+    access_token = create_access_token(username)
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
 def create_access_token(data: str, expires_delta: Optional[timedelta] = None):
