@@ -7,6 +7,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', 8443))
+API_BASE_URL = os.getenv('API_BASE_URL')
 
 # Carregar dados de alimentos do JSON
 with open('tabela_alimentos.json', 'r', encoding='utf-8') as f:
