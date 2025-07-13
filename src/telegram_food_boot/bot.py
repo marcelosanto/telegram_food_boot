@@ -16,7 +16,8 @@ from src.telegram_food_boot.config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_PORT, 
 
 # Conversation states
 SIGNUP_USERNAME, SIGNUP_PASSWORD = range(2)
-LOGIN_USERNAME, LOGIN_PASSWORD = range(2)
+LOGIN_USERNAME, LOGIN_PASSWORD = range(2, 4)
+MEAL_TYPE, MEAL_FOOD, MEAL_QUANTITY = range(4, 7)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,6 @@ async def check_user_authenticated(user_id: int, context: ContextTypes.DEFAULT_T
                 )
                 token = await cursor.fetchone()
                 if token and token[0]:
-                    # Store token in context
                     context.user_data["access_token"] = token[0]
                     return True
             return False
@@ -115,7 +115,8 @@ async def signup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             response = await client.post(
                 f"{API_BASE_URL}/users",
-                json={"username": username, "password": password}
+                data={"username": username, "password": password},
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             response.raise_for_status()
             data = response.json()
@@ -160,51 +161,15 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             response = await client.post(
                 f"{API_BASE_URL}/login",
-                # Use data for form fields
                 data={"username": username, "password": password},
-                # Explicitly set form content type
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             response.raise_for_status()
             data = response.json()
             access_token = data.get("access_token")
             if access_token:
-                context.user_data["access_token"] = access_token
-                async with get_db_connection() as db:
-                    await db.execute(
-                        "INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?)",
-                        (user_id, username)
-                    )
-                    await db.execute(
-                        "INSERT OR REPLACE INTO user_tokens (user_id, access_token) VALUES (?, ?)",
-                        (user_id, access_token)
-                    )
-                    await db.commit()
-                await update.message.reply_text("Login realizado com sucesso! Use /start para continuar.")
-            else:
-                await update.message.reply_text("Usuário ou senha incorretos. Tente novamente.")
-        except httpx.HTTPError as e:
-            logger.error(f"API error during login: {e}")
-            await update.message.reply_text("Erro ao conectar com a API. Tente novamente.")
-        except Exception as e:
-            logger.error(f"Unexpected error during login: {e}")
-            await update.message.reply_text("Erro inesperado. Tente novamente.")
-
-    return ConversationHandler.END
-    password = update.message.text
-    username = context.user_data.get("login_username")
-    user_id = update.effective_user.id
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(
-                f"{API_BASE_URL}/login",
-                json={"username": username, "password": password}
-            )
-            response.raise_for_status()
-            data = response.json()
-            access_token = data.get("access_token")
-            if access_token:
+                logger.info(
+                    f"Received access_token: {access_token} for user_id: {user_id}")
                 context.user_data["access_token"] = access_token
                 async with get_db_connection() as db:
                     await db.execute(
@@ -234,22 +199,78 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-async def meal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def meal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     logger.info(
         f"Received command: /meals for user {update.effective_user.id}")
     if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
-        return
-    await update.message.reply_text("Registre sua refeição: /meals breakfast 1 100")
+        return ConversationHandler.END
+    context.user_data["meals"] = {}
+    keyboard = [
+        [InlineKeyboardButton("Café da manhã", callback_data="breakfast")],
+        [InlineKeyboardButton("Almoço", callback_data="lunch")],
+        [InlineKeyboardButton("Jantar", callback_data="dinner")],
+        [InlineKeyboardButton("Lanche", callback_data="snack")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Selecione o tipo de refeição:", reply_markup=reply_markup)
+    return MEAL_TYPE
 
 
-async def goal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(
-        f"Received command: /goals for user {update.effective_user.id}")
-    if not await check_user_authenticated(update.effective_user.id, context):
-        await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
-        return
-    await update.message.reply_text("Defina sua meta: /goals energy_kcal 2000")
+async def meal_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query:
+        await query.answer()
+        context.user_data["meals"]["meal_type"] = query.data
+        food_data = load_food_data()
+        keyboard = [[InlineKeyboardButton(
+            food["description"], callback_data=f"food_{food['id']}")] for food in food_data[:5]]
+        keyboard.append([InlineKeyboardButton(
+            "Mais opções", callback_data="more_foods")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.reply_text("Selecione um alimento:", reply_markup=reply_markup)
+        return MEAL_FOOD
+    return MEAL_TYPE
+
+
+async def meal_food_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query:
+        await query.answer()
+        if query.data == "more_foods":
+            food_data = load_food_data()
+            keyboard = [[InlineKeyboardButton(
+                food["description"], callback_data=f"food_{food['id']}")] for food in food_data[5:10]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.reply_text("Mais opções de alimentos:", reply_markup=reply_markup)
+            return MEAL_FOOD
+        context.user_data["meals"]["food_id"] = int(
+            query.data.replace("food_", ""))
+        await query.message.reply_text("Digite a quantidade (em gramas):")
+        return MEAL_QUANTITY
+    return MEAL_FOOD
+
+
+async def meal_quantity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    quantity = update.message.text
+    if not quantity.isdigit():
+        await update.message.reply_text("Por favor, insira um número válido para a quantidade.")
+        return MEAL_QUANTITY
+    context.user_data["meals"]["quantity"] = int(quantity)
+    token = context.user_data.get("access_token")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/meals",
+                json=context.user_data["meals"],
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            await update.message.reply_text("Refeição registrada com sucesso!")
+        except httpx.HTTPError as e:
+            logger.error(f"API error during meal: {e}")
+            await update.message.reply_text("Erro ao registrar refeição. Tente novamente.")
+    return ConversationHandler.END
 
 
 async def water_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,17 +279,21 @@ async def water_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
+    args = context.args
+    if not args or len(args) != 1 or not args[0].isdigit():
+        await update.message.reply_text("Use: /water <quantidade_em_ml>, ex.: /water 500")
+        return
+    amount = int(args[0])
     token = context.user_data.get("access_token")
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
                 f"{API_BASE_URL}/water",
-                json={"user_id": update.effective_user.id,
-                      "amount": 2000},  # Example data
+                json={"user_id": update.effective_user.id, "amount": amount},
                 headers={"Authorization": f"Bearer {token}"}
             )
             response.raise_for_status()
-            await update.message.reply_text("Água registrada com sucesso!")
+            await update.message.reply_text(f"Água ({amount}ml) registrada com sucesso!")
         except httpx.HTTPError as e:
             logger.error(f"API error during water: {e}")
             await update.message.reply_text("Erro ao registrar água. Tente novamente.")
@@ -301,7 +326,59 @@ async def calc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
-    await update.message.reply_text("Realize um cálculo: /calculations imc 70 175")
+    args = context.args
+    if not args or len(args) < 3 or args[0] not in ["imc", "tmb", "tdee", "fat"]:
+        await update.message.reply_text("Use: /calculations <tipo> <peso> <altura> [idade] [sexo] [atividade], ex.: /calculations imc 70 175")
+        return
+    calc_type = args[0]
+    weight = float(args[1])
+    height = float(args[2])
+    data = {"calc_type": calc_type, "weight": weight, "height": height}
+    if len(args) > 3:
+        data["age"] = int(args[3])
+        data["gender"] = args[4] if len(args) > 4 else None
+        if calc_type == "tdee" and len(args) > 5:
+            data["activity_level"] = args[5]
+    token = context.user_data.get("access_token")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/calculations",
+                json=data,
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            await update.message.reply_text(response.json()["message"])
+        except httpx.HTTPError as e:
+            logger.error(f"API error during calculation: {e}")
+            await update.message.reply_text("Erro ao realizar cálculo. Tente novamente.")
+
+
+async def goal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(
+        f"Received command: /goals for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
+        await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
+        return
+    args = context.args
+    if not args or len(args) != 2 or not args[1].isdigit():
+        await update.message.reply_text("Use: /goals <nutriente> <valor>, ex.: /goals energy_kcal 2000")
+        return
+    nutrient = args[0]
+    value = int(args[1])
+    token = context.user_data.get("access_token")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/goals",
+                json={"nutrient": nutrient, "value": value},
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            await update.message.reply_text(response.json()["message"])
+        except httpx.HTTPError as e:
+            logger.error(f"API error during goal: {e}")
+            await update.message.reply_text("Erro ao definir meta. Tente novamente.")
 
 
 async def reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,7 +387,25 @@ async def reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
-    await update.message.reply_text("Configure um lembrete: /reminders meal_reminder 12:00")
+    args = context.args
+    if not args or len(args) != 2 or not ":" in args[1]:
+        await update.message.reply_text("Use: /reminders <tipo> <hora>, ex.: /reminders meal_reminder 12:00")
+        return
+    reminder_type = args[0]
+    time = args[1]
+    token = context.user_data.get("access_token")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/reminders",
+                json={"type": reminder_type, "time": time},
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            await update.message.reply_text(response.json()["message"])
+        except httpx.HTTPError as e:
+            logger.error(f"API error during reminder: {e}")
+            await update.message.reply_text("Erro ao configurar lembrete. Tente novamente.")
 
 
 async def tips_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -384,15 +479,28 @@ def main() -> None:
         per_user=True,
     )
 
+    # Meal conversation handler
+    meal_conv = ConversationHandler(
+        entry_points=[CommandHandler("meals", meal_handler)],
+        states={
+            MEAL_TYPE: [CallbackQueryHandler(meal_type_handler)],
+            MEAL_FOOD: [CallbackQueryHandler(meal_food_handler)],
+            MEAL_QUANTITY: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, meal_quantity_handler)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_user=True,
+    )
+
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(signup_conv)
     application.add_handler(login_conv)
-    application.add_handler(CommandHandler("meals", meal_handler))
-    application.add_handler(CommandHandler("goals", goal_handler))
+    application.add_handler(meal_conv)
     application.add_handler(CommandHandler("water", water_handler))
     application.add_handler(CommandHandler("summary", summary_handler))
     application.add_handler(CommandHandler("calculations", calc_handler))
+    application.add_handler(CommandHandler("goals", goal_handler))
     application.add_handler(CommandHandler("reminders", reminder_handler))
     application.add_handler(CommandHandler("tips", tips_handler))
     application.add_handler(CommandHandler("foods", foods_handler))
