@@ -3,6 +3,7 @@ from .utils import translations, get_food_nutrients
 from .config import food_data
 from datetime import datetime, timedelta
 import aiosqlite
+from contextlib import asynccontextmanager
 
 
 async def init_db():
@@ -20,9 +21,13 @@ async def init_db():
                                  (user_id INTEGER, type TEXT, time TEXT)''')
         await db.execute('''CREATE TABLE IF NOT EXISTS users
                                  (user_id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS user_tokens
+                                 (user_id INTEGER PRIMARY KEY, access_token TEXT NOT NULL,
+                                  FOREIGN KEY (user_id) REFERENCES users (user_id))''')
         await db.commit()
 
 
+@asynccontextmanager
 async def get_db_connection():
     """Retorna uma conexão assíncrona com o banco de dados."""
     db = await aiosqlite.connect('nutribot.db')
