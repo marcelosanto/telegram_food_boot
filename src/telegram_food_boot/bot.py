@@ -12,7 +12,7 @@ from telegram.ext import (
 from src.telegram_food_boot.database import get_db_connection
 import httpx
 from src.telegram_food_boot.utils import load_food_data, translations
-from src.telegram_food_boot.config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_PORT
+from src.telegram_food_boot.config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_PORT, API_BASE_URL
 
 # Conversation states
 SIGNUP_USERNAME, SIGNUP_PASSWORD = range(2)
@@ -21,16 +21,34 @@ LOGIN_USERNAME, LOGIN_PASSWORD = range(2)
 logger = logging.getLogger(__name__)
 
 
-async def check_user_authenticated(user_id: int) -> bool:
-    async with get_db_connection() as db:
-        cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        user = await cursor.fetchone()
-        return user is not None
+async def check_user_authenticated(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        async with get_db_connection() as db:
+            logger.info(f"Checking authentication for user_id: {user_id}")
+            cursor = await db.execute(
+                "SELECT user_id, username FROM users WHERE user_id = ?", (
+                    user_id,)
+            )
+            user = await cursor.fetchone()
+            if user:
+                cursor = await db.execute(
+                    "SELECT access_token FROM user_tokens WHERE user_id = ?", (
+                        user_id,)
+                )
+                token = await cursor.fetchone()
+                if token and token[0]:
+                    # Store token in context
+                    context.user_data["access_token"] = token[0]
+                    return True
+            return False
+    except Exception as e:
+        logger.error(f"Database error in check_user_authenticated: {e}")
+        return False
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    is_authenticated = await check_user_authenticated(user_id)
+    is_authenticated = await check_user_authenticated(user_id, context)
 
     keyboard = [
         [InlineKeyboardButton("Cadastrar", callback_data="signup")],
@@ -57,18 +75,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
 
-    if query.data == "signup":
-        await query.message.reply_text("Por favor, envie seu nome de usuário.")
-        return SIGNUP_USERNAME
-    elif query.data == "login":
-        await query.message.reply_text("Por favor, envie seu nome de usuário.")
-        return LOGIN_USERNAME
-    elif query.data == "anonymous":
-        await query.message.reply_text("Modo anônimo ativado. Use /tips ou /foods.")
-        return ConversationHandler.END
+        if query.data == "signup":
+            await query.message.reply_text("Por favor, envie seu nome de usuário.")
+            return SIGNUP_USERNAME
+        elif query.data == "login":
+            await query.message.reply_text("Por favor, envie seu nome de usuário.")
+            return LOGIN_USERNAME
+        elif query.data == "anonymous":
+            await query.message.reply_text("Modo anônimo ativado. Use /tips ou /foods.")
+            return ConversationHandler.END
     return ConversationHandler.END
+
+
+async def signup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Por favor, envie seu nome de usuário.")
+    return SIGNUP_USERNAME
+
+
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Por favor, envie seu nome de usuário.")
+    return LOGIN_USERNAME
 
 
 async def signup_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -80,17 +109,16 @@ async def signup_username(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def signup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text
     username = context.user_data.get("signup_username")
+    user_id = update.effective_user.id
 
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
-                # Adjust to match API base URL
-                f"{WEBHOOK_URL.replace('webhook', '')}api/v1/users",
+                f"{API_BASE_URL}/users",
                 json={"username": username, "password": password}
             )
             response.raise_for_status()
             data = response.json()
-            user_id = update.effective_user.id
             access_token = data.get("access_token")
             if access_token:
                 context.user_data["access_token"] = access_token
@@ -98,6 +126,10 @@ async def signup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     await db.execute(
                         "INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?)",
                         (user_id, username)
+                    )
+                    await db.execute(
+                        "INSERT OR REPLACE INTO user_tokens (user_id, access_token) VALUES (?, ?)",
+                        (user_id, access_token)
                     )
                     await db.commit()
                 await update.message.reply_text("Cadastro realizado com sucesso! Use /start para continuar.")
@@ -122,16 +154,19 @@ async def login_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text
     username = context.user_data.get("login_username")
+    user_id = update.effective_user.id
 
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
-                f"{WEBHOOK_URL.replace('webhook', '')}api/v1/login",
-                data={"username": username, "password": password}
+                f"{API_BASE_URL}/login",
+                # Use data for form fields
+                data={"username": username, "password": password},
+                # Explicitly set form content type
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             response.raise_for_status()
             data = response.json()
-            user_id = update.effective_user.id
             access_token = data.get("access_token")
             if access_token:
                 context.user_data["access_token"] = access_token
@@ -139,6 +174,46 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await db.execute(
                         "INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?)",
                         (user_id, username)
+                    )
+                    await db.execute(
+                        "INSERT OR REPLACE INTO user_tokens (user_id, access_token) VALUES (?, ?)",
+                        (user_id, access_token)
+                    )
+                    await db.commit()
+                await update.message.reply_text("Login realizado com sucesso! Use /start para continuar.")
+            else:
+                await update.message.reply_text("Usuário ou senha incorretos. Tente novamente.")
+        except httpx.HTTPError as e:
+            logger.error(f"API error during login: {e}")
+            await update.message.reply_text("Erro ao conectar com a API. Tente novamente.")
+        except Exception as e:
+            logger.error(f"Unexpected error during login: {e}")
+            await update.message.reply_text("Erro inesperado. Tente novamente.")
+
+    return ConversationHandler.END
+    password = update.message.text
+    username = context.user_data.get("login_username")
+    user_id = update.effective_user.id
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/login",
+                json={"username": username, "password": password}
+            )
+            response.raise_for_status()
+            data = response.json()
+            access_token = data.get("access_token")
+            if access_token:
+                context.user_data["access_token"] = access_token
+                async with get_db_connection() as db:
+                    await db.execute(
+                        "INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?)",
+                        (user_id, username)
+                    )
+                    await db.execute(
+                        "INSERT OR REPLACE INTO user_tokens (user_id, access_token) VALUES (?, ?)",
+                        (user_id, access_token)
                     )
                     await db.commit()
                 await update.message.reply_text("Login realizado com sucesso! Use /start para continuar.")
@@ -160,36 +235,57 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def meal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_user_authenticated(update.effective_user.id):
+    logger.info(
+        f"Received command: /meals for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
     await update.message.reply_text("Registre sua refeição: /meals breakfast 1 100")
 
 
 async def goal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_user_authenticated(update.effective_user.id):
+    logger.info(
+        f"Received command: /goals for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
     await update.message.reply_text("Defina sua meta: /goals energy_kcal 2000")
 
 
 async def water_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_user_authenticated(update.effective_user.id):
+    logger.info(
+        f"Received command: /water for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
-    await update.message.reply_text("Registre água consumida: /water 2000")
+    token = context.user_data.get("access_token")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/water",
+                json={"user_id": update.effective_user.id,
+                      "amount": 2000},  # Example data
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            await update.message.reply_text("Água registrada com sucesso!")
+        except httpx.HTTPError as e:
+            logger.error(f"API error during water: {e}")
+            await update.message.reply_text("Erro ao registrar água. Tente novamente.")
 
 
 async def summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_user_authenticated(update.effective_user.id):
+    logger.info(
+        f"Received command: /summary for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
+    token = context.user_data.get("access_token")
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(
-                f"{WEBHOOK_URL.replace('webhook', '')}api/v1/summary/{update.effective_user.id}",
-                headers={
-                    "Authorization": f"Bearer {context.user_data.get('access_token')}"}
+                f"{API_BASE_URL}/summary/{update.effective_user.id}",
+                headers={"Authorization": f"Bearer {token}"}
             )
             response.raise_for_status()
             summary = response.json()
@@ -200,23 +296,30 @@ async def summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def calc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_user_authenticated(update.effective_user.id):
+    logger.info(
+        f"Received command: /calculations for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
     await update.message.reply_text("Realize um cálculo: /calculations imc 70 175")
 
 
 async def reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_user_authenticated(update.effective_user.id):
+    logger.info(
+        f"Received command: /reminders for user {update.effective_user.id}")
+    if not await check_user_authenticated(update.effective_user.id, context):
         await update.message.reply_text("Você precisa estar logado para usar este comando. Use /login ou /signup.")
         return
     await update.message.reply_text("Configure um lembrete: /reminders meal_reminder 12:00")
 
 
 async def tips_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Received command: /tips for user {update.effective_user.id}")
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(f"{WEBHOOK_URL.replace('webhook', '')}api/v1/tips")
+            response = await client.get(
+                f"{API_BASE_URL}/tips",
+            )
             response.raise_for_status()
             tip = response.json().get("tip")
             await update.message.reply_text(f"Dica do dia: {tip}")
@@ -226,6 +329,8 @@ async def tips_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def foods_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(
+        f"Received command: /foods for user {update.effective_user.id}")
     food_data = load_food_data()
     if not food_data:
         await update.message.reply_text(translations['pt']['no_foods_found'])
@@ -259,8 +364,7 @@ def main() -> None:
 
     # Signup conversation handler
     signup_conv = ConversationHandler(
-        # Start with button handler
-        entry_points=[CommandHandler("signup", button_handler)],
+        entry_points=[CommandHandler("signup", signup_command)],
         states={
             SIGNUP_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, signup_username)],
             SIGNUP_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, signup_password)],
@@ -271,8 +375,7 @@ def main() -> None:
 
     # Login conversation handler
     login_conv = ConversationHandler(
-        # Start with button handler
-        entry_points=[CommandHandler("login", button_handler)],
+        entry_points=[CommandHandler("login", login_command)],
         states={
             LOGIN_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_username)],
             LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
